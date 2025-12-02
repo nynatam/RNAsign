@@ -20,15 +20,13 @@ Also, before starting to use the pipeline, remember to unzip the models in /res 
 ```
 BAM files
     ↓
-[1] bedtools genomecov (Total, 3', 5' coverage)
+[1] bedtools genomecov (Total, 3', 5' BedGraph coverage)
     ↓
-[2] Aggregate.sh (Merge coverage tracks)
+[2] Filter.py (Extract stable regions)
     ↓
-[3] Chunking.py (Extract stable regions)
+[3] Prediction.py (GNN + ML prediction)
     ↓
-[4] Prediction.py (GNN + ML prediction)
-    ↓
-[5] featureCounts (Quantify predicted miRNAs)
+[4] featureCounts (Quantify predicted miRNAs)
     ↓
 Count matrices
 ```
@@ -116,16 +114,6 @@ Edit `nextflow.config`, generate new config file to provide with -C, or provide 
 | `--skip_prediction` | `false` | `true`, `false` | Skip ML prediction |
 | `--skip_filter` | `false` | `true`, `false` | Skip stable region filtering |
 
-#### Resume Parameters
-
-For starting from intermediate steps:
-
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `--bedtools_results` | `null` | Path to bedtools output (if starting from aggregation) |
-| `--aggregated_file` | `null` | Path to aggregated file (if starting from filter) |
-| `--filtered_file` | `null` | Path to filtered regions (if starting from prediction) |
-| `--prediction_output` | `null` | Path to predictions (if starting from featurecounts) |
 
 ### Execution Profiles
 
@@ -163,29 +151,16 @@ Generates three coverage tracks per sample:
 
 **Conda Environment:** `bedtools_env`
 
-**Outputs:** `results/bedtools/{sample_id}/{sample_id}.{Total|3prime|5prime}.csv`
-
-### Stage 2: Coverage Aggregation
-
-Merges the three coverage tracks into a single file using `Aggregate.sh`.
-
 **Outputs:** `results/aggregated/{sample_id}/{sample_id}_aggregated.csv`
-
-**Format:**
-```csv
-RegionID,position,coverage,3prime,5prime
-chr1,1,25,12,13
-```
 
 ### Stage 3: Stable Region Filtering
 
-Extracts stable coverage regions using `Chunking.py` with default parameters:
-- Window size: 15nt
-- Flank size: 30nt
-- Tolerance: ±20%
-- Minimum coverage: 10
+Extracts stable coverage regions using `Filter.py` with default parameters:
+- Minimum sequence length size: 70nt
+- Padding size: 50nt
+- Minimum coverage: 100
 
-**Conda Environment:** `python_env_cpu` or `python_env_gpu`
+**Conda Environment:** `python_env_gpu` - works for both cpu and gpu
 
 **Outputs:** `results/filtered/{sample_id}/{sample_id}_filtered.csv`
 
@@ -218,13 +193,6 @@ Counts reads mapping to predicted miRNA regions using featureCounts.
 
 ### Running Partial Pipelines
 
-#### Start from aggregation (skip bedtools)
-```bash
-nextflow run main.nf \
-    -profile docker \
-    --start_from aggregation \
-    --bedtools_results "results/bedtools/*/*.csv"
-```
 
 #### Run only prediction stage
 ```bash
@@ -309,8 +277,7 @@ Example for 1 sample (~10MB of sorted bam file) run on a desktop with 64GB RAM, 
 | Stage | Time (CPU) | Time (GPU) |
 |-------|-----------|-----------|
 | Bedtools | --- | --- |
-| Aggregation | --- | --- |
-| Chunking | --- | --- |
+| Filter | --- | --- |
 | Prediction | --- | --- |
 | FeatureCounts | --- | --- |
 | **Total** | **---** | **---** |

@@ -28,7 +28,8 @@ workflow {
             bam_ch = Channel.fromPath(params.input_bams)
             
             bedtools_out = bedtools_wf(bam_ch)
-            filter_out = filter_wf(bedtools_out.filter_input_ch)
+            aggregation_out = aggregation_wf(bedtools_out.aggregated_input_ch)
+            filter_out = filter_wf(aggregation_out.filter_input_ch)
             prediction_out = prediction_wf(filter_out.prediction_input_ch)
             
             if (params.run_featurecounts == true) {
@@ -61,14 +62,46 @@ workflow bedtools_wf {
     take: input_bams
     main:
         bam_ch = input_bams.map { bam -> tuple(bam.simpleName, bam) }
-        run_bedtools(bam_ch)
-        filter_input_ch = run_bedtools.out.aggregated_file
+
+        def bedtools_variants = [
+            ['Total', ''],
+            ['3prime', '-3'],
+            ['5prime', '-5']
+        ]
+        bedtools_flags_ch = Channel.fromList(bedtools_variants)
+
+        bam_ch
+            .combine(bedtools_flags_ch)
+            .set { bedtools_input_ch }
+
+        run_bedtools(bedtools_input_ch)
+
+        run_bedtools.out.results
+            .groupTuple()  // [sample_id, [file1, file2, file3]]
+            .map { sample_id, files ->
+                // Sort files by name
+                def sorted = files.sort { it.name }
+                // sorted[0] = 3prime, sorted[1] = 5prime, sorted[2] = Total
+                tuple(sample_id, sorted[2], sorted[0], sorted[1])  // Total, 3prime, 5prime
+    }
+    .set { aggregated_input_ch }
+
     emit:
-        filter_input_ch
+        aggregated_input_ch
         bam_ch
 }
 
-// ─── Filter Workflow ────────────────────────────────────────────────────────
+// ─── Aggregation Workflow ──────────────────────────────────────────────────────
+workflow aggregation_wf {
+    take: aggregated_input_ch
+    main:
+        run_aggregation(aggregated_input_ch)
+        filter_input_ch = run_aggregation.out.aggregated_file
+    emit:
+        filter_input_ch
+}
+
+// ─── Filtering Workflow ────────────────────────────────────────────────────────
 workflow filter_wf {
     take:
         filter_input_ch
@@ -112,26 +145,38 @@ process run_bedtools {
     publishDir "${params.output_dir}/bedtools/${sample_id}", mode: 'copy'
 
     input:
-    tuple val(sample_id), path(bam_file)
+    tuple val(sample_id), path(bam_file), val(name), val(flag)
 
     output:
-    tuple val(sample_id), path("${sample_id}_aggregated.tsv"), emit: aggregated_file
+    // Use the descriptive 'name' for the output filename (e.g., sample1.Total.csv)
+    tuple val(sample_id), path("${sample_id}_${name}.csv"), emit: results
 
     script:
     """
-    echo "Running bedtools on ${bam_file}"
-    export PATH="/home/micromamba/RNAsign/envs/bedtools_env/bin:\$PATH"
-
-    bedtools unionbedg \
-        -filler 0 \
-        -i <(bedtools genomecov -ibam ${bam_file} -bga) \
-           <(bedtools genomecov -ibam ${bam_file} -bga -3) \
-           <(bedtools genomecov -ibam ${bam_file} -bga -5) \
-        > ${sample_id}_aggregated.tsv
-#'
+    echo "Running bedtools '${name}' on ${sample_id}"
+    micromamba run -p /home/micromamba/RNAsign/envs/bedtools_env \
+    bedtools genomecov -ibam ${bam_file} -d ${flag} > ${sample_id}_${name}.csv
     """
 }
 
+process run_aggregation {
+    publishDir "${params.output_dir}/aggregated/${sample_id}", mode: 'copy'
+
+    input:
+    tuple val(sample_id), path(total_file), path(prime3_file), path(prime5_file)
+
+    output:
+    tuple val(sample_id), path("${sample_id}_aggregated.csv"), emit: aggregated_file
+
+    script:
+    """
+    bash ${baseDir}/bin/Aggregate.sh \
+        ${total_file} \
+        ${prime3_file} \
+        ${prime5_file} \
+        ${sample_id}_aggregated.csv
+    """
+}
 
 process run_sequence_filter {
     publishDir "${params.output_dir}/filtered/${sample_id}", mode: 'copy'
@@ -145,9 +190,8 @@ process run_sequence_filter {
 
     script:
     """
-    export PATH="/home/micromamba/RNAsign/envs/python_env_gpu/bin:\$PATH"
-
-    python ${baseDir}/bin/Filter.py ${combinedfile} ${sample_id}_filtered.csv
+    micromamba run -p /home/micromamba/RNAsign/envs/python_env_gpu \
+    python ${baseDir}/bin/Filtering.py ${combinedfile} ${sample_id}_filtered.csv
     """
 }
 
@@ -163,10 +207,9 @@ process run_prediction_script {
 
     script:
     """
-    
-    export PATH="/home/micromamba/RNAsign/envs/python_env_gpu/bin:\$PATH"
+    micromamba run -p /home/micromamba/RNAsign/envs/python_env_gpu \
     python ${baseDir}/bin/Prediction.py -I ${filtered_file} -O . -M TM 
-
+    # Rename outputs to match the glob pattern, ensuring a predictable order
     """
 }
 
@@ -182,7 +225,7 @@ process run_featurecounts {
 
     script:
     """
-    export PATH="/home/micromamba/RNAsign/envs/featurecounts_env/bin:\$PATH"
+    micromamba run -p /home/micromamba/RNAsign/envs/featurecounts_env \
     featureCounts -F SAF -a ${saf_file} -o ${bam_file.simpleName}_featurecounts.txt ${bam_file}
     """
 }
